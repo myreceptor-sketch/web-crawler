@@ -133,6 +133,19 @@ safari_ios (모바일)
 - **통지가 끝난 뒤에는 4·5단을 거치지 않고 곧바로 Chrome CDP로 전환한다** — 헛고생 방지
 - headless Chrome은 Akamai에 탐지됨 → **headed Chrome** 필수 (macOS/Windows)
 
+### Chrome CDP 전략 (브라우저 세션이 필요한 사이트 대응)
+
+```bash
+# 1. Chrome 실행 (사용자 Chrome 종료 필요)
+chrome.exe --remote-debugging-port=9222 \
+  --user-data-dir="C:/temp/crawl_profile" \
+  --no-first-run --no-default-browser-check <URL>
+
+# 2. 연결
+# scripts/chrome_cdp.py 유틸리티 사용
+# 또는 Playwright: p.chromium.connect_over_cdp("http://localhost:9222")
+```
+
 ### Chrome CDP 수집 코드 패턴
 
 ```python

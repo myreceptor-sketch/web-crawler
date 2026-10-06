@@ -376,6 +376,12 @@ with DynamicSession(headless=True, google_search=False) as session:
         page = session.fetch("<URL>", network_idle=True)
 ```
 
+### Infinite Scroll 처리 (우선순위)
+
+1. **API 직행**: 정찰 시 infinite scroll의 underlying API 엔드포인트 발견 → `plain_session()`으로 직접 호출 (가장 빠르고 안정적). 맨 `FetcherSession()`은 기본값이 `impersonate="chrome"` + `stealthy_headers=True` 라 사다리 2단이 아니다
+2. **렌더 스크롤**: API 없으면 `DynamicSession(headless=True, google_search=False)`으로 스크롤 → `network_idle=True` 대기 → 추출 반복. 세션 쪽에는 래퍼가 없으므로 `google_search=False`를 직접 넘긴다 (기본값 `True`는 가짜 Google Referer를 붙인다)
+3. **agent-browser 폴백**: 위 둘 다 실패 시 agent-browser로 수동 스크롤 → DOM 추출 → Scrapling Selector로 파싱
+
 ---
 
 ## 대규모 수집 (Spider)

@@ -254,6 +254,28 @@ agent-browser를 못 쓰고 현재 Codex 세션에 `chrome:control-chrome` 스�
 5. 수집 시 주입은 **요청별 인자**로 한다: `session.get(url, cookies=jar)`.
    `session.cookies.update(jar)` 는 동작하지 않는다(`_SyncSessionLogic` 에 `.cookies` 없음).
 
+#### 쿠키 전달 흐름 (로그인 후)
+
+```python
+import json
+from utils import plain_session
+
+# 1. agent-browser로 수동 로그인 후 쿠키 추출 → output/<도메인>/cookies.json 저장
+#    ★ 수동 로그인 전에 `agent-browser close --all` — 데몬이 떠 있으면 --headed 가 무시된다
+with open("output/<도메인>/cookies.json") as f:
+    cookies = json.load(f)   # {"name": "value", ...}
+
+# 2. 사다리 2단 세션에 주입 (위장 인자 없음 — 로그인 쿠키는 위장이 아니다)
+#    ★ 쿠키는 **요청별 인자**로 넘긴다. `session.cookies.update(...)` 는 동작하지 않는다 —
+#      plain_session() 이 돌려주는 _SyncSessionLogic 에는 .cookies 속성이 없다.
+with plain_session() as session:
+    resp = session.get(url, cookies=cookies)
+```
+
+쿠키 파일은 `.gitignore`의 `**/cookies*.json` 패턴으로 자동 차단된다. 전용 프로필 창에서
+받은 상태를 저장했다면 **대상 도메인분만 골라** 넣는다 — 다른 사이트 세션까지 프로젝트
+폴더로 들어오지 않게.
+
 ---
 
 ## Step 3: 사이트 분류 & 수집 전략 결정
@@ -261,6 +283,8 @@ agent-browser를 못 쓰고 현재 Codex 세션에 `chrome:control-chrome` 스�
 정찰 결과로 사이트를 분류하고 수집 전략을 고른다. 전체 워크플로우에서 가장 중요한 결정이다.
 
 > **Phase 0 선행 확인됨 가정.** 여기 오기 전 [Step 1-B](#step-1-b-phase-0-공인-우회로-체크)에서 공인 API/피드(yt-dlp·RSS·oEmbed·Jina)를 이미 확인했다. Phase 0로 해결됐으면 이 트리를 건너뛴다.
+
+> 📖 도구 역할 분리 원칙과 Fetcher 선택 보충(래퍼, 프로필의 `antibot_type`)은 `references/crawl-operations.md` 를 읽는다.
 
 ### 사다리는 둘이 이어붙은 것이다
 
@@ -401,6 +425,22 @@ Step 3에서 결정한 전략에 맞는 코드 패턴을 `references/fetcher-pat
 
 > except 블록은 그 페이지만 건너뛰고(`continue`) 다음으로 간다. 루프를 끝내는 것은 필수 요소 2의 연속 실패 한도와 사다리 A 소진뿐이다.
 
+> 📖 Fetcher 에스컬레이션 순서와 Rate Limiting 간격은 `references/crawl-operations.md` 를 읽는다.
+
+### 수집 코드 생성 원칙
+
+에이전트는 **(profile.json + 정찰 결과 + 사용자 요청)** 세 가지를 합성해 Python 수집 코드를 동적으로 생성한다.
+
+- **profile.json 우선 활용**: `selectors`/`api_endpoints`/`pagination`이 있으면 그걸 기반으로 코드 골격을 짠다. 새로 정찰해서 코드를 처음부터 쓰지 않는다.
+- **`output/<도메인>/` 의 이전 `crawl_script.py` 참조**: profile.json에 안 박힌 미세 디테일(배치 사이즈, JS evaluate 패턴, 예외 처리)을 그대로 가져와 재사용. 단, raw_data.json은 PII 가능성 있으므로 구조만 확인하고 데이터는 읽지 않는다.
+- `scripts/utils.py`를 import하여 RateLimiter, cookie 관리, 로깅 등 공통 기능 사용
+- `scripts/export_excel.py`를 import하여 엑셀 출력
+- `scripts/chrome_cdp.py`는 `antibot_strategy: chrome_cdp`(사다리 6단)로 기록된 도메인에서 사용 — 통지 게이트를 이미 넘은 경우
+- 수집 스크립트는 해당 작업의 출력 디렉터리 하에서 작업 (`references/output-layout.md` 참조)
+- 셀렉터 핑거프린트는 `storage_args={"storage_file": "./fingerprints/elements_storage.db"}` 경로 사용
+- **수집 성공 후 반드시 profile.json save/갱신** — 새로 알아낸 endpoint/selector/notes는 누적, `last_used`만 업데이트하지 말 것 (Step 5-A 게이트)
+- **새 도메인이면 `python scripts/sync_domain_list.py` 실행** — CLAUDE.md/README.md의 "알려진 도메인" 목록은 profile.json에서 생성된다. 손으로 고치지 말 것 (`scripts/test_sync_domain_list.py`가 어긋남을 잡는다)
+
 ### 출력 디렉토리 구조
 
 ```
@@ -410,6 +450,8 @@ output/<도메인>/<주제_YYYYMMDD_HHMMSS>/
 ├── crawl_result.xlsx   # 엑셀 결과
 └── progress.json       # 진행 상황
 ```
+
+> 📖 쿠키·도메인 프로필 위치와 폴더 이름 규칙은 `references/output-layout.md` 를 읽는다.
 
 ### 셀렉터 자가 치유
 
@@ -470,6 +512,15 @@ if verdict["blocked"]:
 
 > 📖 수집 실패 시 원인 진단은 `references/troubleshooting.md`를 참조한다.
 
+> 📖 에러 유형별 대응(429·403·소프트블록·타임아웃·0건 등)은 `references/crawl-operations.md` § 에러별 대응표를 읽는다.
+
+### 검증 통과 기준 (Step 5)
+
+- 수집 건수가 목표 대비 **90% 이상** (API/HTML 수집)
+- 전체 데이터의 **95% 이상이 유효** (Step 5 검증 통과)
+- 각 필드별 **null/빈값 비율 10% 이하**
+- 미달 시 Step 4 재시도 (최대 2회). 재실패 시 수집된 데이터로 진행하되 사용자에게 경고
+
 ### 값이 그럴듯한가 (필수)
 
 건수와 null 비율만 보면 **광고를 상품으로 가져온 경우를 통과시킨다.** 자가치유 셀렉터는
@@ -525,6 +576,21 @@ profile_mgr.save(domain, {
 })
 ```
 
+> `fetcher_type`/`antibot_strategy` 는 위 목록 안의 값으로 적는다. 문서에 없는 값을 지어내면 분류기가 사다리 칸을 판별하지 못해 저장이 거부되고, 사다리 B 로 수집해 놓고 A 쪽 값을 적으면 그 레시피가 배포 대상으로 잘못 분류된다.
+>
+> **여기 목록이 곧 분류기가 아는 전부는 아니다.** 실제 판정표는 `scripts/profile_policy.py` 의 `TOOLS` 하나뿐이고, 위 목록은 그중 흔히 쓰는 값을 추린 것이다. 적을 값이 애매하면 지어내지 말고 그 표를 직접 본다 — 표에 없는 값은 `save()` 가 `ConsentRequired` 로 거부한다(심사가 아니라 "분류기가 알아들을 수 있는 값을 달라" 는 뜻이다).
+>
+> **`robots.txt`·ToS 사유로 배포에서 빼야 하는 프로필은 `distribution: "local"` 을 명시한다.** 사다리 A(1~3단)라 자동으로는 `public` 이 되는 프로필이라도 이 선언은 무조건 인정된다(조이는 방향은 항상 통과). 사유는 `distribution_reason` 에 한 줄로 남긴다 — 예: `cafe.naver.com`, `www.instagram.com`.
+
+새 도메인 프로필을 처음 만들었다면 저장 직후 목록을 재생성한다 (`CLAUDE.md` 의 "알려진 도메인" 블록은 생성물):
+
+```bash
+python scripts/sync_domain_list.py          # CLAUDE.md / README.md 목록 재생성
+python scripts/sync_domain_list.py --check  # 어긋나면 exit 1
+```
+
+> 📖 `fingerprints/` 의 `.gitignore` whitelist 정책은 `references/output-layout.md` 를 읽는다.
+
 ### 게이트 규칙
 
 1. **`notes` 필드는 비워두지 않는다.** 다음 사람(미래의 나 포함)이 정찰 안 하고도 바로 수집할 수 있는 한두 줄의 결정적 정보를 적는다 — "API key는 OK, job_group_id=518이 일반 목록", "리스트는 SSR HTML, 상세는 XHR JSON — 2단으로 충분", "review API는 POST에 originProductNo 필요" 같은 형식.
@@ -564,4 +630,6 @@ export_to_excel(data, filepath)
 | `references/fetcher-patterns.md` | 모든 수집 패턴의 코드 템플릿 | Step 4에서 crawl_script.py 생성 시 |
 | `references/antibot-strategies.md` | Akamai, SPA 세션, Cloudflare 대응 전략 | Step 3에서 안티봇 감지 시 |
 | `references/troubleshooting.md` | 실패 사례와 해결책 | 수집 실패 시 원인 진단 |
+| `references/crawl-operations.md` | 도구 역할 분리, Fetcher 선택 보충, 에스컬레이션, 에러별 대응표, Rate Limiting | Step 3 전략 결정, Step 4 코드 생성, 수집 실패 시 |
+| `references/output-layout.md` | 출력·저장 디렉터리 구조, `.gitignore` whitelist 정책 | Step 4 출력 폴더 생성, Step 5-A 프로필 저장 시 |
 | `scripts/scrapling_reference.md` | Scrapling API 레퍼런스 (Fetcher 종류·Selector·Spider·세션) | 라이브러리 사용법이 헷갈릴 때 |
