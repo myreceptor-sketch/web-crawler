@@ -1,12 +1,15 @@
 """전기넷(jungi.net) 공고별 '참여업체 엑셀' 다운로드 스크립트 (사용자 PC에서 실행).
 
 공고마다: 상세페이지 열기 → 공고번호/종목(전기) 확인 → 참여업체보기 클릭
-→ 업체목록 창에서 엑셀 클릭 → 기본 파일명 그대로 다운로드 폴더에 저장.
+→ 업체목록 창에서 엑셀 클릭 → 다운로드 폴더에 저장.
+엑셀은 참여업체 전체를 담는다. 다만 업체목록이 다 불러와지기 전에 누르면 50행만 받아지므로,
+충분히 기다린 뒤 누르고 정확히 50행이면 더 기다려 한 번 더 받는다. 파일명은 <공고번호>.xlsx.
 
 사용:
     pip install playwright openpyxl && playwright install chromium
     python scripts/jungi_download.py --xlsx "<목록.xlsx>" --limit 3        # 먼저 3건 시험
     python scripts/jungi_download.py --xlsx "<목록.xlsx>"                   # 전체 (끊겨도 재실행하면 이어서)
+    python scripts/jungi_download.py --xlsx "<목록.xlsx>" --only E012502290  # 한 공고만 시험
 
 기본 저장 폴더는 사용자 Downloads(C:\\Users\\admin\\Downloads). 진행 기록은 --log (CSV).
 로그인이 필요하면 창이 뜬 상태(기본 headed)에서 직접 로그인한 뒤 Enter 를 누른다.
@@ -27,22 +30,51 @@ from playwright.sync_api import sync_playwright
 HEADER_ROW = 6          # 엑셀 6행이 헤더, 7행부터 데이터
 COL_NO, COL_URL = 3, 10  # 0-based: 공고번호(D), 상세페이지(K)
 MAX_CONSECUTIVE_FAIL = 5
+CAP_ROWS = 50            # 목록이 덜 불러와졌을 때 엑셀에 담기는 행 수 (의심 기준)
+LOAD_WAIT = 5.0          # 업체목록 창을 연 뒤 엑셀을 누르기 전 기다리는 시간(초)
 
 
 def read_targets(xlsx):
-    ws = openpyxl.load_workbook(xlsx, read_only=True).active
+    wb = openpyxl.load_workbook(xlsx, read_only=True)
     out = []
-    for row in ws.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
+    for row in wb.active.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
         if row[COL_NO] and row[COL_URL]:
             out.append((str(row[COL_NO]).strip(), str(row[COL_URL]).strip()))
+    wb.close()
     return out
 
 
 def load_done(log):
+    """완료로 본 공고번호. 업체 수 검증 도입 전 기록(상세가 'rows=' 로 시작하지 않음)은 제외한다."""
     if not log.exists():
         return set()
     with open(log, encoding="utf-8-sig") as f:
-        return {r["공고번호"] for r in csv.DictReader(f) if r["상태"] == "OK"}
+        return {r["공고번호"] for r in csv.DictReader(f)
+                if r["상태"] == "OK" and r["상세"].startswith("rows=")}
+
+
+def safe_name(no):
+    return re.sub(r'[\\/:*?"<>|]', "_", no)
+
+
+def result_file(outdir, no):
+    return outdir / f"{safe_name(no)}.xlsx"
+
+
+def count_rows(path):
+    """받은 엑셀의 업체 행 수 (순위 열이 숫자인 행). 읽지 못하면 -1."""
+    wb = None
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True)
+        # 위쪽 공고 정보 블록은 제외 — 순위(숫자)와 사업자등록번호(10자리)가 함께 있는 행만 센다
+        return sum(1 for r in wb.active.iter_rows(values_only=True)
+                   if len(r) > 1 and r[0] is not None and re.fullmatch(r"\d+", str(r[0]).strip())
+                   and re.fullmatch(r"\d{10}", re.sub(r"\D", "", str(r[1] or ""))))
+    except Exception:
+        return -1
+    finally:
+        if wb:
+            wb.close()   # read_only 로 열면 파일이 계속 잠겨 삭제·덮어쓰기가 막힌다
 
 
 def unique_path(folder, name):
@@ -73,7 +105,34 @@ def find_click(ctx_pages, text, timeout=8000):
     return None
 
 
-def process(ctx, page, no, url, outdir):
+def download_excel(ctx, pop, dest):
+    """업체목록 창의 엑셀 버튼을 눌러 dest 로 저장. 실패하면 사유 문자열, 성공이면 None."""
+    xl = find_click(lambda: [pop], r"엑셀|Excel")
+    if not xl:
+        return "엑셀 버튼 없음"
+    # 엑셀 버튼이 새 탭을 열어 다운로드하는 경우도 있으므로, 이후 생기는 페이지에도 리스너를 건다
+    got = []
+
+    def attach(pg):
+        pg.on("download", lambda d: got.append(d))
+
+    for p in ctx.pages:
+        attach(p)
+    ctx.on("page", attach)
+    try:
+        xl.click()
+        end = time.time() + 60
+        while not got and time.time() < end:
+            pop.wait_for_timeout(300)  # time.sleep 은 Playwright 이벤트를 처리하지 못한다
+    finally:
+        ctx.remove_listener("page", attach)
+    if not got:
+        return "다운로드 이벤트 없음"
+    got[0].save_as(dest)
+    return None
+
+
+def process(ctx, page, no, url, outdir, delay=8.0):
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_load_state("networkidle", timeout=15000)
     body = page.inner_text("body")
@@ -89,47 +148,49 @@ def process(ctx, page, no, url, outdir):
     btn = find_click(lambda: ctx.pages, "참여업체보기")
     if not btn:
         return "FAIL", "참여업체보기 버튼 없음"
-    btn.click()
-    page.wait_for_timeout(1500)  # 새 창 또는 레이어 팝업이 뜰 시간
-
-    for p in set(ctx.pages) - before:
-        try:
-            p.wait_for_load_state("domcontentloaded", timeout=10000)
-        except PWTimeout:
-            pass
-
-    xl = find_click(lambda: ctx.pages, r"엑셀|Excel")
-    if not xl:
-        return "FAIL", "엑셀 버튼 없음"
-    # 다운로드는 클릭한 페이지(업체목록 창일 수 있음)에서 발생한다 — 모든 페이지에 리스너를 건다
-    # 엑셀 버튼이 새 탭을 열어 다운로드하는 경우도 있으므로, 이후 생기는 페이지에도 리스너를 건다
-    got = []
-
-    def attach(pg):
-        pg.on("download", lambda d: got.append(d))
-
-    for p in ctx.pages:
-        attach(p)
-    ctx.on("page", attach)
+    # '참여업체보기' 는 새 창(all_company)을 연다. 그 창이 열린 것을 확인한 뒤에만 그 창의 엑셀을 누른다.
+    # (상세 페이지에도 엑셀 버튼이 있지만 그건 50행만 담긴다 — 절대 누르지 않는다)
     try:
-        xl.click()
-        end = time.time() + 60
-        while not got and time.time() < end:
-            page.wait_for_timeout(300)  # time.sleep 은 Playwright 이벤트를 처리하지 못한다
-    finally:
-        ctx.remove_listener("page", attach)
-    if not got:
-        return "FAIL", "다운로드 이벤트 없음"
-    d = got[0]
-    dest = unique_path(outdir, d.suggested_filename)
-    d.save_as(dest)
+        with ctx.expect_page(timeout=15000) as ev:
+            btn.click()
+        pop = ev.value
+        pop.wait_for_load_state("domcontentloaded", timeout=15000)
+    except PWTimeout:
+        return "FAIL", "참여업체 보기 창이 열리지 않음"
+    if "all_company" not in pop.url and "참여업체 보기" not in pop.inner_text("body"):
+        return "FAIL", f"참여업체 보기 창이 아님: {pop.url[:80]}"
+
+    dest = result_file(outdir, no)
+    if dest.exists() and count_rows(dest) == CAP_ROWS:
+        try:
+            dest.unlink()       # 이전 실행에서 상세 페이지 엑셀(50행)로 받은 것으로 의심되는 파일
+        except PermissionError:
+            return "FAIL", f"{dest.name} 이(가) 엑셀 등에서 열려 있음 — 닫고 다시 실행"
+    note = ""
+    if not dest.exists():
+        for attempt, wait in enumerate((LOAD_WAIT, LOAD_WAIT * 3)):
+            try:
+                pop.wait_for_load_state("networkidle", timeout=15000)
+            except PWTimeout:
+                pass
+            pop.wait_for_timeout(int(wait * 1000))
+            err = download_excel(ctx, pop, dest)
+            if err:
+                return "FAIL", err
+            if count_rows(dest) != CAP_ROWS:
+                break
+            if attempt == 0:
+                dest.unlink()   # 정확히 50행이면 덜 불러온 것일 수 있어 더 기다려 다시 받는다
+            else:
+                note = " (정확히 50행 — 실제 업체 수 확인 필요)"
+    n = count_rows(dest)
 
     for p in set(ctx.pages) - before:   # 업체목록 창 닫기
         try:
             p.close()
         except Exception:
             pass
-    return "OK", dest.name
+    return "OK", f"rows={n}{note}"
 
 
 def safe_accept(d):
@@ -150,6 +211,7 @@ def main():
     ap.add_argument("--delay", type=float, default=8.0, help="공고 사이 기본 대기(초), ±50%% 지터")
     ap.add_argument("--batch", type=int, default=50, help="이 건수마다 길게 쉰다 (0=쉬지 않음)")
     ap.add_argument("--batch-pause", type=float, default=120.0, help="배치마다 쉬는 시간(초)")
+    ap.add_argument("--only", default="", help="이 공고번호 한 건만 처리 (시험용)")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--profile", default=".jungi_profile", help="로그인 유지용 전용 브라우저 프로필 폴더")
     a = ap.parse_args()
@@ -158,7 +220,16 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     log = Path(a.log)
     done = load_done(log)
-    targets = [t for t in read_targets(a.xlsx)[a.start:] if t[0] not in done]
+    all_t = read_targets(a.xlsx)[a.start:]
+    if a.only:
+        all_t = [t for t in all_t if t[0] == a.only]
+        done.discard(a.only)
+    # 이전에 받은 건: 50행 미만이면 전부 받은 것, 정확히 50행이면 덜 받았을 수 있어 다시 받는다
+    for no, _ in all_t:
+        f = result_file(outdir, no)
+        if no not in done and f.exists() and 0 <= count_rows(f) < CAP_ROWS and not a.only:
+            done.add(no)
+    targets = [t for t in all_t if t[0] not in done]
     if a.limit:
         targets = targets[: a.limit]
     print(f"대상 {len(targets)}건 (이미 완료 {len(done)}건 제외) → {outdir}")
@@ -181,7 +252,7 @@ def main():
 
         for i, (no, url) in enumerate(targets, 1):
             try:
-                status, detail = process(ctx, page, no, url, outdir)
+                status, detail = process(ctx, page, no, url, outdir, a.delay)
             except Exception as e:
                 status, detail = "FAIL", f"{type(e).__name__}: {str(e)[:120]}"
             # 남은 팝업 정리
