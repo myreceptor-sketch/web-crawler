@@ -66,9 +66,9 @@ def count_rows(path):
     wb = None
     try:
         wb = openpyxl.load_workbook(path, read_only=True)
-        # 위쪽 공고 정보 블록은 제외 — 순위(숫자)와 사업자등록번호(10자리)가 함께 있는 행만 센다
+        # 위쪽 공고 정보 블록은 제외 — 순위(숫자, 낙찰하한가 미달은 음수)와 사업자등록번호(10자리)가 함께 있는 행만 센다
         return sum(1 for r in wb.active.iter_rows(values_only=True)
-                   if len(r) > 1 and r[0] is not None and re.fullmatch(r"\d+", str(r[0]).strip())
+                   if len(r) > 1 and r[0] is not None and re.fullmatch(r"-?\d+", str(r[0]).strip())
                    and re.fullmatch(r"\d{10}", re.sub(r"\D", "", str(r[1] or ""))))
     except Exception:
         return -1
