@@ -44,6 +44,17 @@ def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL):
     return out
 
 
+def read_expected(xlsx, col_no, col_exp):
+    """목록 엑셀의 '전체 참여업체 수' 열 → {공고번호: 수}. 받은 파일의 업체 수 검증에 쓴다."""
+    wb = openpyxl.load_workbook(xlsx, read_only=True)
+    out = {}
+    for row in wb.active.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
+        if len(row) > max(col_no, col_exp) and row[col_no] and str(row[col_exp]).strip().isdigit():
+            out[str(row[col_no]).strip()] = int(str(row[col_exp]).strip())
+    wb.close()
+    return out
+
+
 def load_done(log):
     """완료로 본 공고번호. 업체 수 검증 도입 전 기록(상세가 'rows=' 로 시작하지 않음)은 제외한다."""
     if not log.exists():
@@ -132,7 +143,7 @@ def download_excel(ctx, pop, dest):
     return None
 
 
-def process(ctx, page, no, url, outdir, delay=8.0):
+def process(ctx, page, no, url, outdir, delay=8.0, force=False, expected=None):
     page.goto(url, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_load_state("networkidle", timeout=15000)
     body = page.inner_text("body")
@@ -161,9 +172,9 @@ def process(ctx, page, no, url, outdir, delay=8.0):
         return "FAIL", f"참여업체 보기 창이 아님: {pop.url[:80]}"
 
     dest = result_file(outdir, no)
-    if dest.exists() and count_rows(dest) == CAP_ROWS:
+    if dest.exists() and (force or count_rows(dest) == CAP_ROWS):
         try:
-            dest.unlink()       # 이전 실행에서 상세 페이지 엑셀(50행)로 받은 것으로 의심되는 파일
+            dest.unlink()       # 상세 페이지 엑셀(50행 이하)로 잘못 받은 파일은 지우고 다시 받는다
         except PermissionError:
             return "FAIL", f"{dest.name} 이(가) 엑셀 등에서 열려 있음 — 닫고 다시 실행"
     note = ""
@@ -184,6 +195,8 @@ def process(ctx, page, no, url, outdir, delay=8.0):
             else:
                 note = " (정확히 50행 — 실제 업체 수 확인 필요)"
     n = count_rows(dest)
+    if expected and n != expected:
+        note += f" (목록 {expected} != 실제 {n} — 확인 필요)"
 
     for p in set(ctx.pages) - before:   # 업체목록 창 닫기
         try:
@@ -206,6 +219,8 @@ def main():
     ap.add_argument("--xlsx", required=True)
     ap.add_argument("--col-no", type=int, default=COL_NO, help="공고번호 열 (0-based, 기본 3=D)")
     ap.add_argument("--col-url", type=int, default=COL_URL, help="상세페이지 URL 열 (0-based, 기본 10=K)")
+    ap.add_argument("--col-expected", type=int, default=-1, help="전체 참여업체 수 열 (0-based, 받은 파일 검증용)")
+    ap.add_argument("--force", action="store_true", help="이미 있는 파일도 지우고 다시 받는다")
     ap.add_argument("--out", default=str(Path.home() / "Downloads"))
     ap.add_argument("--log", default="jungi_download_log.csv")
     ap.add_argument("--start", type=int, default=0, help="목록에서 시작할 0-based 위치")
@@ -227,9 +242,10 @@ def main():
         all_t = [t for t in all_t if t[0] == a.only]
         done.discard(a.only)
     # 이전에 받은 건: 50행 미만이면 전부 받은 것, 정확히 50행이면 덜 받았을 수 있어 다시 받는다
+    expected = read_expected(a.xlsx, a.col_no, a.col_expected) if a.col_expected >= 0 else {}
     for no, _ in all_t:
         f = result_file(outdir, no)
-        if no not in done and f.exists() and 0 <= count_rows(f) < CAP_ROWS and not a.only:
+        if no not in done and f.exists() and not a.only and not a.force and 0 <= count_rows(f) < CAP_ROWS:
             done.add(no)
     targets = [t for t in all_t if t[0] not in done]
     if a.limit:
@@ -254,7 +270,7 @@ def main():
 
         for i, (no, url) in enumerate(targets, 1):
             try:
-                status, detail = process(ctx, page, no, url, outdir, a.delay)
+                status, detail = process(ctx, page, no, url, outdir, a.delay, a.force, expected.get(no))
             except Exception as e:
                 status, detail = "FAIL", f"{type(e).__name__}: {str(e)[:120]}"
             # 남은 팝업 정리
