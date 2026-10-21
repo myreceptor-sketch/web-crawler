@@ -34,12 +34,12 @@ CAP_ROWS = 50            # 목록이 덜 불러와졌을 때 엑셀에 담기는
 LOAD_WAIT = 5.0          # 업체목록 창을 연 뒤 엑셀을 누르기 전 기다리는 시간(초)
 
 
-def read_targets(xlsx):
+def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL):
     wb = openpyxl.load_workbook(xlsx, read_only=True)
     out = []
     for row in wb.active.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
-        if row[COL_NO] and row[COL_URL]:
-            out.append((str(row[COL_NO]).strip(), str(row[COL_URL]).strip()))
+        if len(row) > max(col_no, col_url) and row[col_no] and row[col_url]:
+            out.append((str(row[col_no]).strip(), str(row[col_url]).strip()))
     wb.close()
     return out
 
@@ -204,6 +204,8 @@ def safe_accept(d):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", required=True)
+    ap.add_argument("--col-no", type=int, default=COL_NO, help="공고번호 열 (0-based, 기본 3=D)")
+    ap.add_argument("--col-url", type=int, default=COL_URL, help="상세페이지 URL 열 (0-based, 기본 10=K)")
     ap.add_argument("--out", default=str(Path.home() / "Downloads"))
     ap.add_argument("--log", default="jungi_download_log.csv")
     ap.add_argument("--start", type=int, default=0, help="목록에서 시작할 0-based 위치")
@@ -220,7 +222,7 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     log = Path(a.log)
     done = load_done(log)
-    all_t = read_targets(a.xlsx)[a.start:]
+    all_t = read_targets(a.xlsx, a.col_no, a.col_url)[a.start:]
     if a.only:
         all_t = [t for t in all_t if t[0] == a.only]
         done.discard(a.only)
