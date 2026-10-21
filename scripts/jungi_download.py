@@ -102,13 +102,22 @@ def process(ctx, page, no, url, outdir):
     if not xl:
         return "FAIL", "엑셀 버튼 없음"
     # 다운로드는 클릭한 페이지(업체목록 창일 수 있음)에서 발생한다 — 모든 페이지에 리스너를 건다
+    # 엑셀 버튼이 새 탭을 열어 다운로드하는 경우도 있으므로, 이후 생기는 페이지에도 리스너를 건다
     got = []
+
+    def attach(pg):
+        pg.on("download", lambda d: got.append(d))
+
     for p in ctx.pages:
-        p.on("download", got.append)
-    xl.click()
-    end = time.time() + 60
-    while not got and time.time() < end:
-        time.sleep(0.3)
+        attach(p)
+    ctx.on("page", attach)
+    try:
+        xl.click()
+        end = time.time() + 60
+        while not got and time.time() < end:
+            page.wait_for_timeout(300)  # time.sleep 은 Playwright 이벤트를 처리하지 못한다
+    finally:
+        ctx.remove_listener("page", attach)
     if not got:
         return "FAIL", "다운로드 이벤트 없음"
     d = got[0]
@@ -123,6 +132,14 @@ def process(ctx, page, no, url, outdir):
     return "OK", dest.name
 
 
+def safe_accept(d):
+    """alert/confirm 을 닫는다. 이미 닫힌 대화상자면 오류가 나므로 무시한다."""
+    try:
+        d.accept()
+    except Exception:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", required=True)
@@ -130,7 +147,9 @@ def main():
     ap.add_argument("--log", default="jungi_download_log.csv")
     ap.add_argument("--start", type=int, default=0, help="목록에서 시작할 0-based 위치")
     ap.add_argument("--limit", type=int, default=0, help="이번 실행에서 처리할 최대 건수 (0=전체)")
-    ap.add_argument("--delay", type=float, default=3.0, help="공고 사이 기본 대기(초), ±50%% 지터")
+    ap.add_argument("--delay", type=float, default=8.0, help="공고 사이 기본 대기(초), ±50%% 지터")
+    ap.add_argument("--batch", type=int, default=50, help="이 건수마다 길게 쉰다 (0=쉬지 않음)")
+    ap.add_argument("--batch-pause", type=float, default=120.0, help="배치마다 쉬는 시간(초)")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--profile", default=".jungi_profile", help="로그인 유지용 전용 브라우저 프로필 폴더")
     a = ap.parse_args()
@@ -153,9 +172,9 @@ def main():
             w.writerow(["공고번호", "상태", "상세", "시각"])
         ctx = pw.chromium.launch_persistent_context(
             a.profile, headless=a.headless, accept_downloads=True,
-            downloads_path=str(outdir), viewport={"width": 1280, "height": 900})
+            viewport={"width": 1280, "height": 900})
         page = ctx.pages[0] if ctx.pages else ctx.new_page()
-        page.on("dialog", lambda d: d.accept())
+        page.on("dialog", safe_accept)
         page.goto("https://www.jungi.net/")
         if not a.headless:
             input("로그인이 필요하면 창에서 직접 로그인한 뒤 Enter 를 누르세요 (불필요하면 바로 Enter): ")
@@ -182,6 +201,9 @@ def main():
                 print(f"연속 {fails}건 실패 — 중단합니다. 사이트 구조/차단 여부를 확인하세요.")
                 break
             time.sleep(a.delay * random.uniform(0.5, 1.5))
+            if a.batch and i % a.batch == 0 and i < len(targets):
+                print(f"{i}건마다 휴식 — {a.batch_pause:.0f}초 대기 (서버 부하 완화)")
+                time.sleep(a.batch_pause)
         ctx.close()
 
 
