@@ -34,10 +34,10 @@ CAP_ROWS = 50            # 목록이 덜 불러와졌을 때 엑셀에 담기는
 LOAD_WAIT = 5.0          # 업체목록 창을 연 뒤 엑셀을 누르기 전 기다리는 시간(초)
 
 
-def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL):
+def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL, header_row=HEADER_ROW):
     wb = openpyxl.load_workbook(xlsx, read_only=True)
     out = []
-    for row in wb.active.iter_rows(min_row=HEADER_ROW + 1, values_only=True):
+    for row in wb.active.iter_rows(min_row=header_row + 1, values_only=True):
         if len(row) > max(col_no, col_url) and row[col_no] and row[col_url]:
             out.append((str(row[col_no]).strip(), str(row[col_url]).strip()))
     wb.close()
@@ -217,6 +217,7 @@ def safe_accept(d):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", required=True)
+    ap.add_argument("--header-row", type=int, default=HEADER_ROW, help="헤더 행 번호 (1-based, 기본 6 — 데이터는 그 다음 행부터)")
     ap.add_argument("--col-no", type=int, default=COL_NO, help="공고번호 열 (0-based, 기본 3=D)")
     ap.add_argument("--col-url", type=int, default=COL_URL, help="상세페이지 URL 열 (0-based, 기본 10=K)")
     ap.add_argument("--col-expected", type=int, default=-1, help="전체 참여업체 수 열 (0-based, 받은 파일 검증용)")
@@ -237,7 +238,7 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     log = Path(a.log)
     done = load_done(log)
-    all_t = read_targets(a.xlsx, a.col_no, a.col_url)[a.start:]
+    all_t = read_targets(a.xlsx, a.col_no, a.col_url, a.header_row)[a.start:]
     if a.only:
         all_t = [t for t in all_t if t[0] == a.only]
         done.discard(a.only)
