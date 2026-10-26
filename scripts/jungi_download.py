@@ -30,15 +30,20 @@ from playwright.sync_api import sync_playwright
 HEADER_ROW = 6          # 엑셀 6행이 헤더, 7행부터 데이터
 COL_NO, COL_URL = 3, 10  # 0-based: 공고번호(D), 상세페이지(K)
 MAX_CONSECUTIVE_FAIL = 5
+SEARCH_URL = "https://www.jungi.net/nbid"   # 낙찰정보 검색 (공사명·공고번호·발주기관)
 CAP_ROWS = 50            # 목록이 덜 불러와졌을 때 엑셀에 담기는 행 수 (의심 기준)
 LOAD_WAIT = 5.0          # 업체목록 창을 연 뒤 엑셀을 누르기 전 기다리는 시간(초)
 
 
 def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL, header_row=HEADER_ROW):
+    """col_url < 0 이면 URL 열이 없는 목록 — 공고번호만 읽고 URL 은 빈 문자열(검색 모드)."""
     wb = openpyxl.load_workbook(xlsx, read_only=True)
     out = []
     for row in wb.active.iter_rows(min_row=header_row + 1, values_only=True):
-        if len(row) > max(col_no, col_url) and row[col_no] and row[col_url]:
+        if col_url < 0:
+            if len(row) > col_no and row[col_no] and re.fullmatch(r"E\d+(-\d+)?", str(row[col_no]).strip()):
+                out.append((str(row[col_no]).strip(), ""))
+        elif len(row) > max(col_no, col_url) and row[col_no] and row[col_url]:
             out.append((str(row[col_no]).strip(), str(row[col_url]).strip()))
     wb.close()
     return out
@@ -143,9 +148,44 @@ def download_excel(ctx, pop, dest):
     return None
 
 
-def process(ctx, page, no, url, outdir, delay=8.0, force=False, expected=None):
-    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+def open_by_search(ctx, page, no):
+    """상세 URL 이 없는 목록용: 낙찰정보(/nbid) 검색창에 공고번호를 넣어 검색하고, 결과 행을 눌러 상세로 간다.
+
+    반환: (상세를 보여주는 페이지, None) 또는 (None, 실패 사유). 검색창이 없으면 로그인이 풀린 것이다.
+    """
+    page.goto(SEARCH_URL, wait_until="domcontentloaded", timeout=30000)
     page.wait_for_load_state("networkidle", timeout=15000)
+    box = page.locator("#search_text")
+    if not box.count():
+        return None, "검색창 없음 — 로그인이 풀렸는지 확인"
+    box.fill(no)
+    page.locator("#search_btn").click()
+    page.wait_for_load_state("networkidle", timeout=15000)
+    page.wait_for_timeout(1000)
+    row = page.locator("tr", has_text=no)
+    if not row.count():
+        return None, "검색 결과 없음"
+    before = set(ctx.pages)
+    link = row.first.locator("a")
+    (link.first if link.count() else row.first).click()
+    page.wait_for_timeout(2000)
+    opened = list(set(ctx.pages) - before)
+    detail = opened[0] if opened else page    # 새 탭이면 그 탭, 아니면 같은 탭
+    try:
+        detail.wait_for_load_state("networkidle", timeout=15000)
+    except PWTimeout:
+        pass
+    return detail, None
+
+
+def process(ctx, page, no, url, outdir, delay=8.0, force=False, expected=None, search=False):
+    if search:
+        page, err = open_by_search(ctx, page, no)
+        if err:
+            return "SKIP" if err == "검색 결과 없음" else "FAIL", err
+    else:
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        page.wait_for_load_state("networkidle", timeout=15000)
     body = page.inner_text("body")
 
     if no not in body:
@@ -219,7 +259,7 @@ def main():
     ap.add_argument("--xlsx", required=True)
     ap.add_argument("--header-row", type=int, default=HEADER_ROW, help="헤더 행 번호 (1-based, 기본 6 — 데이터는 그 다음 행부터)")
     ap.add_argument("--col-no", type=int, default=COL_NO, help="공고번호 열 (0-based, 기본 3=D)")
-    ap.add_argument("--col-url", type=int, default=COL_URL, help="상세페이지 URL 열 (0-based, 기본 10=K)")
+    ap.add_argument("--col-url", type=int, default=COL_URL, help="상세페이지 URL 열 (0-based, 기본 10=K). URL 열이 없으면 -1 — 공고번호로 검색해서 연다")
     ap.add_argument("--col-expected", type=int, default=-1, help="전체 참여업체 수 열 (0-based, 받은 파일 검증용)")
     ap.add_argument("--force", action="store_true", help="이미 있는 파일도 지우고 다시 받는다")
     ap.add_argument("--out", default=str(Path.home() / "Downloads"))
@@ -271,7 +311,7 @@ def main():
 
         for i, (no, url) in enumerate(targets, 1):
             try:
-                status, detail = process(ctx, page, no, url, outdir, a.delay, a.force, expected.get(no))
+                status, detail = process(ctx, page, no, url, outdir, a.delay, a.force, expected.get(no), search=a.col_url < 0)
             except Exception as e:
                 status, detail = "FAIL", f"{type(e).__name__}: {str(e)[:120]}"
             # 남은 팝업 정리
