@@ -194,6 +194,8 @@ def process(ctx, page, no, url, outdir, delay=8.0, force=False, expected=None, s
         page.wait_for_load_state("networkidle", timeout=15000)
     body = page.inner_text("body")
 
+    if "/login" in page.url:   # 세션이 풀리면 로그인 화면으로 보내진다 — SKIP 으로 넘기지 말고 연속 실패로 멈춘다
+        return "FAIL", "로그인이 풀림 — 창에서 다시 로그인 필요"
     if no not in body:
         return "SKIP", "공고번호 불일치"
     m = re.search(r"종목\s*[:：]?\s*([^\n\t]+)", body)
