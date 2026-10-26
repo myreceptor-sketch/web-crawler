@@ -263,6 +263,11 @@ def safe_accept(d):
 
 
 def main():
+    for st in (sys.stdout, sys.stderr):
+        try:
+            st.reconfigure(encoding="utf-8", errors="replace")   # 파일로 리다이렉트해도 한글·기호 출력이 깨지지 않게
+        except Exception:
+            pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--xlsx", required=True)
     ap.add_argument("--header-row", type=int, default=HEADER_ROW, help="헤더 행 번호 (1-based, 기본 6 — 데이터는 그 다음 행부터)")
