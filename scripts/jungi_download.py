@@ -35,6 +35,12 @@ CAP_ROWS = 50            # 목록이 덜 불러와졌을 때 엑셀에 담기는
 LOAD_WAIT = 5.0          # 업체목록 창을 연 뒤 엑셀을 누르기 전 기다리는 시간(초)
 
 
+def cell_url(v):
+    """셀 값에서 URL 을 꺼낸다. =HYPERLINK("https://…","표시글") 수식이면 첫 번째 주소를 쓴다."""
+    m = re.search(r"https?://[^\"\s]+", str(v))
+    return m.group(0) if m else str(v).strip()
+
+
 def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL, header_row=HEADER_ROW):
     """col_url < 0 이면 URL 열이 없는 목록 — 공고번호만 읽고 URL 은 빈 문자열(검색 모드)."""
     wb = openpyxl.load_workbook(xlsx, read_only=True)
@@ -44,7 +50,7 @@ def read_targets(xlsx, col_no=COL_NO, col_url=COL_URL, header_row=HEADER_ROW):
             if len(row) > col_no and row[col_no] and re.fullmatch(r"E\d+(-\d+)?", str(row[col_no]).strip()):
                 out.append((str(row[col_no]).strip(), ""))
         elif len(row) > max(col_no, col_url) and row[col_no] and row[col_url]:
-            out.append((str(row[col_no]).strip(), str(row[col_url]).strip()))
+            out.append((str(row[col_no]).strip(), cell_url(row[col_url])))
     wb.close()
     return out
 
